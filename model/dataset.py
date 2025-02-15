@@ -1,7 +1,6 @@
 import json
 import random
 import re
-
 import pandas as pd
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
@@ -9,47 +8,74 @@ import torch
 from sklearn.model_selection import train_test_split
 import os
 import ast
+from multiprocessing import Pool, cpu_count
+from tqdm import tqdm
+import functools
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
+def process_sample(item, tokenizer, max_length):
+    """处理单个样本的函数"""
+    text, = item
+    text = f"{tokenizer.bos_token}{str(text)}{tokenizer.eos_token}"
+    
+    encoding = tokenizer(
+        text,
+        max_length=max_length,
+        padding='max_length',
+        truncation=True,
+        return_tensors='pt'
+    )
+    
+    input_ids = encoding.input_ids.squeeze()
+    loss_mask = (input_ids != tokenizer.pad_token_id)
+    
+    X = input_ids[:-1]
+    Y = input_ids[1:]
+    loss_mask = loss_mask[1:]
+    
+    return X, Y, loss_mask
+
+
 class PretrainDataset(Dataset):
-    def __init__(self, data_path, tokenizer, max_length=512):
+    def __init__(self, data_path, tokenizer, max_length=512, num_workers=None):
         super().__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
-        self.samples = self.load_data(data_path)
-
-    def load_data(self, path):
-        samples = []
-        with open(path, 'r', encoding='utf-8') as f:
-            for line_num, line in enumerate(f, 1):
-                data = json.loads(line.strip())
-                samples.append(data)
-        return samples
+        self.samples = []
+        
+        # 确定进程数
+        if num_workers is None:
+            num_workers = min(cpu_count(), 8)  # 使用最多8个进程
+        
+        # 读取所有数据
+        print("Loading data...")
+        with open(data_path, 'r', encoding='utf-8') as f:
+            data = [json.loads(line.strip()) for line in f]
+        
+        # 准备数据
+        texts = [(str(item['text']),) for item in data]
+        
+        # 创建进程池
+        print(f"Preprocessing data using {num_workers} processes...")
+        process_func = functools.partial(process_sample, tokenizer=tokenizer, max_length=max_length)
+        
+        with Pool(num_workers) as pool:
+            # 使用imap处理数据，显示进度条
+            self.samples = list(tqdm(
+                pool.imap(process_func, texts),
+                total=len(texts),
+                desc="Processing samples"
+            ))
+        
+        print(f"Loaded and processed {len(self.samples)} samples")
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, index):
-        sample = self.samples[index]
-
-        # 构建输入文本
-        text = f"{self.tokenizer.bos_token}{str(sample['text'])}{self.tokenizer.eos_token}"
-        encoding = self.tokenizer(
-            text,
-            max_length=self.max_length,
-            padding='max_length',
-            truncation=True,
-            return_tensors='pt'
-        )
-        input_ids = encoding.input_ids.squeeze()
-        loss_mask = (input_ids != self.tokenizer.pad_token_id)
-
-        X = torch.tensor(input_ids[:-1], dtype=torch.long)
-        Y = torch.tensor(input_ids[1:], dtype=torch.long)
-        loss_mask = torch.tensor(loss_mask[1:], dtype=torch.long)
-        return X, Y, loss_mask
+        return self.samples[index]
 
 
 class SFTDataset(Dataset):

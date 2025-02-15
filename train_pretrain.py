@@ -168,16 +168,26 @@ if __name__ == "__main__":
         wandb = None
 
     model, tokenizer = init_model(lm_config)
-    train_ds = PretrainDataset(args.data_path, tokenizer, max_length=lm_config.max_seq_len)
+    
+    # 使用多进程预处理数据
+    num_workers = min(os.cpu_count(), 8)  # 最多使用8个进程
+    train_ds = PretrainDataset(
+        args.data_path, 
+        tokenizer, 
+        max_length=lm_config.max_seq_len,
+        num_workers=num_workers
+    )
+    
     train_sampler = DistributedSampler(train_ds) if ddp else None
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
         pin_memory=True,
         drop_last=False,
-        shuffle=False,
+        shuffle=False if ddp else True,  # 如果是DDP模式，shuffle由DistributedSampler处理
         num_workers=args.num_workers,
-        sampler=train_sampler
+        sampler=train_sampler,
+        persistent_workers=True  # 保持worker进程存活，减少创建和销毁的开销
     )
 
     scaler = torch.cuda.amp.GradScaler(enabled=(args.dtype in ['float16', 'bfloat16']))
